@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+redis
+cryptography
+psycopg2-binary
+redshift_connector

@@ -1,0 +1,40 @@
+# Two identical app replicas, one shared Redis. The whole point of this
+# file: prove that idempotency and risk-velocity state genuinely survive
+# a request being handled by a DIFFERENT replica than the one that first
+# saw it -- which is the exact scaling problem the cache/ package exists
+# to solve, and something we could only ever test with one process before.
+#
+# IMPORTANT: both replicas must share the SAME JWT_SECRET. A token issued
+# by app1 has to validate on app2, or this whole test is meaningless --
+# that's why it's a top-level env var here, not hardcoded per-service.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  app1:
+    build: .
+    ports:
+      - "8001:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-do-not-use-in-production}
+      RUN_LOCAL_SIMULATOR: "1"
+      SWITCH_HOST: 127.0.0.1
+      SWITCH_PORT: "9999"
+    depends_on:
+      - redis
+
+  app2:
+    build: .
+    ports:
+      - "8002:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-do-not-use-in-production}
+      RUN_LOCAL_SIMULATOR: "1"
+      SWITCH_HOST: 127.0.0.1
+      SWITCH_PORT: "9999"
+    depends_on:
+      - redis

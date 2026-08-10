@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+*.log
+
+# Never commit real data -- api/ledger.db has contained real names and CNICs
+# during testing. This rule exists specifically to make that mistake impossible.
