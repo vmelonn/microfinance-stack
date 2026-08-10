@@ -288,23 +288,85 @@ tests" pattern as everything else:
 - **Analytics warehouse** (`analytics/`) — the operational ledger (SQLite)
   is optimized for "does this account have the funds, right now" -- a few
   rows per transaction. A real warehouse is optimized for the opposite:
-  scanning everything at once for reporting. Same swappable-interface
-  pattern again: `LocalWarehouse` (real Postgres, fully tested) and
-  `RedshiftWarehouse` (real `redshift_connector` API shape, genuinely
-  untestable in a sandbox with no route to AWS -- but Redshift speaks the
-  Postgres wire protocol, so the SQL is nearly identical between the two;
-  swapping requires only a connection change, not different code).
-  `sync_to_warehouse.py` does an INCREMENTAL sync (only pulls transactions
-  newer than what's already loaded) -- the real production pattern, not a
-  full reload every run, matching `ops/run_reconciliation.py`'s
-  "runs on its own schedule" shape. Found and fixed a real bug while
-  building this: comparing timestamps as raw strings across SQLite and
-  Postgres silently broke incremental sync, since Postgres's plain
-  `TIMESTAMP` type drops the UTC offset SQLite's own string format
-  carries -- every sync re-processed the same rows forever (saved from
-  actual duplicates only by `ON CONFLICT DO NOTHING`, luck, not
-  correctness). Fixed with `TIMESTAMPTZ`, regression-tested directly in
-  `analytics/tests/test_warehouse.py`.
+  scanning everything at once for reporting. Real systems export from one
+  into the other precisely because a single engine being good at both jobs
+  is rare.
+
+  **This was Redshift, and is now ClickHouse.** `RedshiftWarehouse` was
+  correct-shaped code that could never actually be run -- no AWS account, no
+  cluster, no credentials -- so it sat in exactly the position
+  `AWSKeyManagementService` still occupies: honest about being untestable,
+  and untested. ClickHouse self-hosts in a container, so
+  `analytics/tests/test_warehouse.py` now executes real SQL against a real
+  server instead of asserting behaviour by reading the code. For the one
+  component whose entire job is to be trusted with reporting numbers, that
+  is a strictly better position. The swap was cheap because the
+  `DataWarehouse` interface already existed -- which is the whole reason it
+  existed.
+
+  The loading model inverts, and it is worth knowing why: Redshift punishes
+  row-by-row `INSERT` and wants `COPY FROM S3`, meaning an S3 bucket, an IAM
+  role, a staging table, and `MERGE` grammar. ClickHouse wants large batched
+  inserts and needs none of that -- several hundred lines of planned
+  infrastructure simply disappeared. Idempotent re-loading comes from
+  `ReplacingMergeTree(loaded_at)` keyed on `(transaction_ts, rrn)`;
+  `PARTITION BY toYYYYMM` makes the 7-year retention TTL a metadata-only
+  partition drop; and a `SummingMergeTree` materialized view keeps daily
+  volume as a single-digit-millisecond read at any table size.
+
+  Two ClickHouse traps are pinned by tests rather than discovered later:
+  deduplication is **eventual**, happening at background merge time, so any
+  query that must not see duplicates says `FINAL`; and a materialized view
+  fires on `INSERT`, **before** that deduplication, so a re-loaded row
+  double-counts in the aggregate even though the fact table self-corrects.
+  That second one is why `sync_to_warehouse.py` advances its watermark only
+  after a batch is confirmed — the watermark is what keeps the aggregates
+  honest, not merely what makes the sync fast.
+
+  The original timestamp bug is still fixed, differently and more simply.
+  Comparing timestamps as raw strings across SQLite and Postgres used to
+  break incremental sync, because Postgres's plain `TIMESTAMP` drops the UTC
+  offset SQLite's string format carries -- every sync re-processed the same
+  rows forever, saved from real duplicates only by `ON CONFLICT DO NOTHING`,
+  which is luck rather than correctness. The watermark is now stored as the
+  **exact string the source emitted** and fed back verbatim, so there is no
+  parse and nothing to lose in translation.
+
+- **IBM ACE transport** (`switch/transport.py`, `switch/soap_client.py`) —
+  a second way for a transaction to reach the switch, selected by
+  `ISO8583_TRANSPORT=direct|ace`.
+
+  `direct` is everything Stages 1-3 built: this process owns the codec, the
+  socket, and STAN correlation. `ace` hands a SOAP request to an IBM App
+  Connect Enterprise integration server, which parses and serializes ISO
+  8583 from a DFDL schema and holds the TCP connection itself. Under `ace`
+  this process opens no socket to the switch at all.
+
+  `api/routes/transactions.py` cannot tell the difference — it calls
+  `transport.authorize(...)` with no MTI, no DE numbers, and no STAN,
+  because under ACE it never sees any of them. The interface is narrow
+  specifically so the two stay interchangeable.
+
+  Stages 1-3 are **not** dead code once ACE arrives. The Python codec is the
+  executable specification the DFDL schema has to agree with, it is what the
+  test suite runs against, and it is what still works when the integration
+  server is down. Deleting it would trade a tested implementation for an
+  untested one.
+
+  The IBM entitlement had not come through, so the ACE artifacts (DFDL
+  schema, WSDL, ESQL, message-flow spec) live in the companion
+  `microfinance-microservices` repository under `ace/`, alongside
+  `ace-stub` — a Python service serving the identical WSDL that this
+  transport can be pointed at today with no licence at all.
+
+  This also introduced a third outcome. `AuthorizationResult.outcome` is
+  `approved`, `declined`, or **`unknown`** — because a call can succeed
+  while its response is lost, leaving the cardholder possibly debited for a
+  transaction we cannot confirm. On `unknown` the ledger posting is skipped
+  entirely and the response says so; `ops/reconciliation.py` is the backstop
+  that catches it against the switch's own settlement file. The monolith
+  previously collapsed that case into an error, which quietly meant
+  reporting failure for money that may genuinely have moved.
 
 ## How we'll work through it
 

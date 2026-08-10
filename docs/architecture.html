@@ -1,0 +1,1418 @@
+<title>Microfinance Transaction Stack — Architecture</title>
+<style>
+  /* ===================================================================
+     TOKENS
+
+     Light is defined on bare :root; dark redefines ONLY tokens, twice --
+     once under prefers-color-scheme (guarded so an explicit light choice
+     beats a dark OS) and once under [data-theme="dark"] so a toggle wins
+     in both directions. No component ever declares a colour outside this
+     block.
+     =================================================================== */
+  :root {
+    --ground:        #F2F4F6;
+    --surface:       #FFFFFF;
+    --surface-sunk:  #E8ECEF;
+    --rule:          #D3DAE0;
+    --rule-soft:     #E2E7EB;
+
+    --ink:           #16202B;
+    --ink-soft:      #56636F;   /* blue-biased grey, picked to sit under the accent */
+    --ink-faint:     #808D99;
+
+    --accent:        #B4531A;   /* burnt copper -- the ISO 8583 / binary world */
+    --accent-sunk:   #F6EAE1;
+    --accent-2:      #1F6F8B;   /* petrol -- the SOAP / integration boundary */
+    --accent-2-sunk: #E3EFF3;
+
+    --ok:            #2E7D5B;
+    --warn:          #A8761C;
+    --crit:          #B03A3A;
+    --ok-sunk:       #E4F0EA;
+    --warn-sunk:     #F7EEDC;
+    --crit-sunk:     #F7E6E6;
+
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", "Menlo", "Consolas", monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+
+    --measure: 68ch;
+    --step--1: 0.812rem;
+    --step-0:  1rem;
+    --step-1:  1.18rem;
+    --step-2:  1.48rem;
+    --step-3:  1.95rem;
+    --step-4:  2.6rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:        #10161C;
+      --surface:       #17202A;
+      --surface-sunk:  #1D2833;
+      --rule:          #2C3944;
+      --rule-soft:     #232F3A;
+
+      --ink:           #E4E9EE;
+      --ink-soft:      #94A2B0;
+      --ink-faint:     #6C7C8A;
+
+      --accent:        #E88B4D;
+      --accent-sunk:   #2A1F17;
+      --accent-2:      #4FA8C4;
+      --accent-2-sunk: #16262D;
+
+      --ok:            #5CBF92;
+      --warn:          #D9A94E;
+      --crit:          #E07A7A;
+      --ok-sunk:       #15251E;
+      --warn-sunk:     #262015;
+      --crit-sunk:     #271A1A;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:        #10161C;
+    --surface:       #17202A;
+    --surface-sunk:  #1D2833;
+    --rule:          #2C3944;
+    --rule-soft:     #232F3A;
+
+    --ink:           #E4E9EE;
+    --ink-soft:      #94A2B0;
+    --ink-faint:     #6C7C8A;
+
+    --accent:        #E88B4D;
+    --accent-sunk:   #2A1F17;
+    --accent-2:      #4FA8C4;
+    --accent-2-sunk: #16262D;
+
+    --ok:            #5CBF92;
+    --warn:          #D9A94E;
+    --crit:          #E07A7A;
+    --ok-sunk:       #15251E;
+    --warn-sunk:     #262015;
+    --crit-sunk:     #271A1A;
+  }
+
+  /* =================================================================== */
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    /* Explicit, from a token: the viewer paints its own ground behind the
+       page, so a transparent body borrows the host's theme. */
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 clamp(1rem, 4vw, 3rem);
+  }
+
+  @media (min-width: 1000px) {
+    .shell { grid-template-columns: 15rem minmax(0, 1fr); gap: 3.5rem; }
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    grid-column: 1 / -1;
+    padding: clamp(3rem, 8vw, 5.5rem) 0 2.5rem;
+    border-bottom: 2px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+  }
+  .masthead h1 {
+    font-family: var(--mono);
+    font-size: clamp(1.9rem, 5.5vw, var(--step-4));
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.08;
+    text-wrap: balance;
+    margin: 0 0 1rem;
+  }
+  .standfirst {
+    max-width: var(--measure);
+    font-size: var(--step-1);
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 2.5rem;
+    margin-top: 2.25rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+  }
+  .fact { display: flex; flex-direction: column; gap: 0.15rem; }
+  .fact b {
+    font-size: var(--step-2);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+  }
+  .fact span { color: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; }
+
+  /* ---------- nav ---------- */
+
+  nav.index {
+    grid-column: 1;
+    padding: 2.5rem 0;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+  }
+  @media (min-width: 1000px) {
+    nav.index { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto; }
+  }
+  nav.index ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+  nav.index a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    display: flex;
+    gap: 0.7rem;
+    border-left: 2px solid transparent;
+    padding-left: 0.7rem;
+    transition: color .15s, border-color .15s;
+  }
+  nav.index a:hover, nav.index a:focus-visible { color: var(--accent); border-left-color: var(--accent); }
+  nav.index a .n { color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+
+  /* ---------- main ---------- */
+
+  main { grid-column: 1; padding: 2.5rem 0 6rem; min-width: 0; }
+  @media (min-width: 1000px) { main { grid-column: 2; } }
+
+  section { padding-block: 2.75rem; border-top: 1px solid var(--rule-soft); }
+  section:first-of-type { border-top: 0; padding-top: 1rem; }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: var(--step-3);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 0.4rem;
+    scroll-margin-top: 1.5rem;
+  }
+  h2 .num {
+    color: var(--accent);
+    font-size: var(--step-1);
+    margin-right: 0.6rem;
+    font-variant-numeric: tabular-nums;
+  }
+  h3 {
+    font-family: var(--mono);
+    font-size: var(--step-1);
+    font-weight: 600;
+    margin: 2.5rem 0 0.5rem;
+    text-wrap: balance;
+  }
+  h4 {
+    font-family: var(--mono);
+    font-size: var(--step-0);
+    font-weight: 600;
+    color: var(--ink-soft);
+    margin: 1.75rem 0 0.4rem;
+  }
+  p, li { max-width: var(--measure); }
+  p { margin: 0 0 1rem; }
+  ul, ol.prose { padding-left: 1.2rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--accent); }
+  strong { font-weight: 650; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-sunk);
+    padding: 0.12em 0.36em;
+    border-radius: 3px;
+  }
+
+  .lede { font-size: var(--step-1); color: var(--ink-soft); max-width: var(--measure); margin-bottom: 1.75rem; }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 3px solid var(--accent-2);
+    background: var(--accent-2-sunk);
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+    max-width: var(--measure);
+  }
+  .note.warn { border-left-color: var(--warn); background: var(--warn-sunk); }
+  .note.crit { border-left-color: var(--crit); background: var(--crit-sunk); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .tag {
+    display: block;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent-2);
+    margin-bottom: 0.4rem;
+  }
+  .note.warn .tag { color: var(--warn); }
+  .note.crit .tag { color: var(--crit); }
+
+  /* ---------- tables ---------- */
+
+  .scroll { overflow-x: auto; margin: 1.5rem 0; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: var(--step--1);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    background: var(--surface-sunk);
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.mono, th.mono, .tnum { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  td.mono { white-space: nowrap; }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .pill.get  { background: var(--accent-2-sunk); color: var(--accent-2); }
+  .pill.post { background: var(--accent-sunk);   color: var(--accent); }
+  .pill.ok   { background: var(--ok-sunk);   color: var(--ok); }
+  .pill.warn { background: var(--warn-sunk); color: var(--warn); }
+  .pill.crit { background: var(--crit-sunk); color: var(--crit); }
+
+  /* ---------- code + hex ---------- */
+
+  pre {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    line-height: 1.55;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    margin: 1.25rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  pre .c { color: var(--ink-faint); }
+  pre .k { color: var(--accent); }
+  pre .s { color: var(--accent-2); }
+
+  /* Byte-offset rail: the structural device for the binary sections.
+     The offsets are real information -- position IS identity in ISO 8583. */
+  .hex { margin: 1.5rem 0; border: 1px solid var(--rule); background: var(--surface); overflow-x: auto; }
+  .hex table { font-size: var(--step--1); }
+  .hex td:first-child {
+    font-family: var(--mono);
+    color: var(--ink-faint);
+    background: var(--surface-sunk);
+    text-align: right;
+    white-space: nowrap;
+    width: 1%;
+    font-variant-numeric: tabular-nums;
+  }
+  .hex td:nth-child(2) { font-family: var(--mono); color: var(--accent); white-space: nowrap; }
+  .hex td:nth-child(3) { font-family: var(--mono); white-space: nowrap; }
+  .hex td:last-child { color: var(--ink-soft); }
+
+  /* ---------- figures ---------- */
+
+  figure { margin: 2rem 0; }
+  figure .scroll { margin: 0; padding: 1.25rem; }
+  figcaption {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--ink-faint);
+    margin-top: 0.6rem;
+    max-width: var(--measure);
+  }
+  svg { display: block; max-width: 100%; height: auto; }
+  svg text { font-family: var(--mono); fill: var(--ink); }
+  svg .lbl  { font-size: 11px; }
+  svg .sm   { font-size: 9.5px; fill: var(--ink-soft); }
+  svg .tiny { font-size: 8.5px; fill: var(--ink-faint); }
+  svg .box  { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+  svg .box-a { fill: var(--accent-sunk); stroke: var(--accent); stroke-width: 1; }
+  svg .box-b { fill: var(--accent-2-sunk); stroke: var(--accent-2); stroke-width: 1; }
+  svg .ln   { stroke: var(--ink-soft); stroke-width: 1; fill: none; }
+  svg .ln-a { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+  svg .ln-d { stroke: var(--ink-faint); stroke-width: 1; stroke-dasharray: 3 3; fill: none; }
+  svg .life { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 4; }
+
+  /* ---------- layer list ---------- */
+
+  .layers { display: flex; flex-direction: column; gap: 0; margin: 1.75rem 0; }
+  .layer {
+    display: grid;
+    grid-template-columns: 2.6rem minmax(0, 1fr);
+    gap: 1rem;
+    padding: 1.1rem 0;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .layer:last-child { border-bottom: 1px solid var(--rule-soft); }
+  .layer .n {
+    font-family: var(--mono);
+    font-size: var(--step-1);
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .layer h4 { margin: 0 0 0.2rem; color: var(--ink); font-size: var(--step-0); }
+  .layer p { margin: 0; color: var(--ink-soft); font-size: var(--step--1); }
+  .layer .path { font-family: var(--mono); color: var(--ink-faint); font-size: 0.78rem; }
+
+  /* ---------- endpoint blocks ---------- */
+
+  .ep { border: 1px solid var(--rule); background: var(--surface); margin: 1.5rem 0; overflow: hidden; }
+  .ep > header {
+    display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap;
+    padding: 0.7rem 1rem;
+    background: var(--surface-sunk);
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+  }
+  .ep > header .path { font-weight: 600; }
+  .ep > header .auth { margin-left: auto; color: var(--ink-faint); font-size: 0.78rem; }
+  .ep .body { padding: 0.9rem 1rem; }
+  .ep .body > p { margin: 0 0 0.75rem; font-size: var(--step--1); }
+  .ep pre { margin: 0.5rem 0; border-left-width: 2px; }
+
+  footer {
+    grid-column: 1 / -1;
+    border-top: 2px solid var(--ink);
+    padding: 2rem 0 4rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--ink-faint);
+  }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="eyebrow">microfinance-stack · architecture reference</p>
+    <h1>A card transaction stack,<br>one layer at a time</h1>
+    <p class="standfirst">
+      REST on the outside, ISO 8583 on the inside. Eight layers built so each
+      one is testable before the next depends on it — plus the extensions that
+      turned a learning build into something that survives a second replica,
+      a process restart, and a switch that stops answering.
+    </p>
+    <div class="facts">
+      <div class="fact"><b>8</b><span>core layers</span></div>
+      <div class="fact"><b>7</b><span>extensions</span></div>
+      <div class="fact"><b>53</b><span>tests passing</span></div>
+      <div class="fact"><b>2</b><span>switch transports</span></div>
+    </div>
+  </header>
+
+  <nav class="index" aria-label="Contents">
+    <ol>
+      <li><a href="#overview"><span class="n">00</span> Overview</a></li>
+      <li><a href="#layers"><span class="n">01</span> The eight layers</a></li>
+      <li><a href="#message"><span class="n">02</span> ISO 8583 anatomy</a></li>
+      <li><a href="#purchase"><span class="n">03</span> Purchase flow</a></li>
+      <li><a href="#cycles"><span class="n">04</span> Cycles</a></li>
+      <li><a href="#transport"><span class="n">05</span> Transports &amp; ACE</a></li>
+      <li><a href="#api"><span class="n">06</span> API reference</a></li>
+      <li><a href="#data"><span class="n">07</span> Data model</a></li>
+      <li><a href="#analytics"><span class="n">08</span> ClickHouse</a></li>
+      <li><a href="#failure"><span class="n">09</span> Failure modes</a></li>
+      <li><a href="#deploy"><span class="n">10</span> Deployment</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <!-- ============================================ 00 -->
+    <section id="overview">
+      <h2><span class="num">00</span>Overview</h2>
+      <p class="lede">
+        A cardholder taps a phone. Eleven milliseconds later a bank's switch has
+        approved or refused it. This is what happens in between.
+      </p>
+
+      <p>
+        The stack presents an ordinary JSON API — <code>POST /transactions/purchase</code>,
+        an amount, a card number, a PIN. Underneath, that request becomes a
+        BCD-packed binary ISO 8583 message with a bitmap, gets framed with a
+        two-byte length header, travels a persistent TCP socket to a payment
+        switch, and comes back matched to its caller by a six-digit trace number.
+        None of that is visible above layer five, and that invisibility is the
+        design.
+      </p>
+
+      <figure>
+        <div class="scroll">
+          <svg viewBox="0 0 720 330" role="img" aria-label="Layer stack from REST down to the payment switch">
+            <!-- boundary labels -->
+            <text class="tiny" x="8" y="22">DOMAIN</text>
+            <text class="tiny" x="600" y="22">ON THE WIRE</text>
+
+            <g>
+              <rect class="box-b" x="90" y="34" width="420" height="34"/>
+              <text class="lbl" x="104" y="55">Layer 5 — REST API (FastAPI)</text>
+              <text class="sm" x="530" y="55">JSON</text>
+            </g>
+            <g>
+              <rect class="box" x="90" y="76" width="420" height="34"/>
+              <text class="lbl" x="104" y="97">Layer 7 — Risk gate</text>
+              <text class="sm" x="530" y="97">decision</text>
+            </g>
+            <g>
+              <rect class="box" x="90" y="118" width="420" height="34"/>
+              <text class="lbl" x="104" y="139">Layer 4 — Security · PIN block, HSM</text>
+              <text class="sm" x="530" y="139">8 bytes</text>
+            </g>
+            <g>
+              <rect class="box-a" x="90" y="160" width="420" height="34"/>
+              <text class="lbl" x="104" y="181">Layer 1 — Message codec · MTI, bitmap, BCD</text>
+              <text class="sm" x="530" y="181">binary</text>
+            </g>
+            <g>
+              <rect class="box" x="90" y="202" width="420" height="34"/>
+              <text class="lbl" x="104" y="223">Layer 3 — Correlation · STAN match, timeout</text>
+              <text class="sm" x="530" y="223">0200/0210</text>
+            </g>
+            <g>
+              <rect class="box-a" x="90" y="244" width="420" height="34"/>
+              <text class="lbl" x="104" y="265">Layer 2 — Connection · MLI framing, TCP</text>
+              <text class="sm" x="530" y="265">MLI + bytes</text>
+            </g>
+
+            <!-- side rails -->
+            <path class="ln-d" d="M78 34 L78 278"/>
+            <text class="tiny" x="12" y="120">6 ledger</text>
+            <text class="tiny" x="12" y="134">8 ops</text>
+            <text class="tiny" x="12" y="148">observe</text>
+            <path class="ln-d" d="M70 112 L78 112 M70 156 L78 156"/>
+
+            <!-- switch -->
+            <rect class="box" x="205" y="292" width="190" height="30" rx="15"/>
+            <text class="lbl" x="238" y="311">payment switch</text>
+            <path class="ln-a" d="M300 278 L300 292"/>
+          </svg>
+        </div>
+        <figcaption>
+          Each boundary changes the representation. Copper marks where the data
+          is genuinely binary; everything above layer four is still structured
+          text a person can read.
+        </figcaption>
+      </figure>
+
+      <div class="note">
+        <span class="tag">The one guarantee</span>
+        <p>
+          Every idempotency mechanism in this stack is best-effort — the Redis
+          claim, the retry policy, the reversal on timeout. The single
+          guarantee that cannot be wrong is <code>PRIMARY KEY (rrn)</code> on
+          the <code>transactions</code> table. It is enforced by the database
+          in one atomic statement and it holds no matter how many replicas
+          race. Ten concurrent writers on one RRN produce exactly one posting.
+        </p>
+      </div>
+    </section>
+
+    <!-- ============================================ 01 -->
+    <section id="layers">
+      <h2><span class="num">01</span>The eight layers</h2>
+      <p class="lede">
+        Numbered because they genuinely are a sequence: each was built and
+        tested before the next one was allowed to depend on it.
+      </p>
+
+      <div class="layers">
+        <div class="layer">
+          <div class="n">1</div>
+          <div>
+            <h4>Message layer <span class="path">iso8583/</span></h4>
+            <p>Builds and parses raw ISO 8583: MTI, primary and secondary bitmaps, BCD-packed data elements, the full DE 2–128 catalogue. Everything stays bytes — no ASCII digit encoding.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">2</div>
+          <div>
+            <h4>Connection layer <span class="path">switch/</span></h4>
+            <p>A TCP client that frames messages with a two-byte MLI, signs on, heartbeats every three seconds, and reconnects on any drop. Plus a host simulator, so the whole stack is testable without a bank.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">3</div>
+          <div>
+            <h4>Correlation layer <span class="path">correlation/</span></h4>
+            <p>Tracks in-flight requests by STAN, matches responses to callers, applies a timeout, and fires a <code>0400</code> reversal when one expires. This is what lets everything above it pretend the exchange is synchronous.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">4</div>
+          <div>
+            <h4>Security layer <span class="path">security/</span></h4>
+            <p>ISO 9564 Format 0 PIN blocks, a mock HSM with per-transaction key derivation, and a KMS doing real AES-256-GCM envelope encryption so the base key survives a restart.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">5</div>
+          <div>
+            <h4>REST API <span class="path">api/</span></h4>
+            <p>FastAPI. What a mobile app calls. Drives layers 1–4 and 6–8 in a fixed order and translates whatever comes back into plain JSON.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">6</div>
+          <div>
+            <h4>Ledger <span class="path">ledger/</span></h4>
+            <p>Double-entry bookkeeping in SQLite. <code>users → accounts → cards</code>, and a debit/credit pair per transaction that must always balance.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">7</div>
+          <div>
+            <h4>Risk <span class="path">risk/</span></h4>
+            <p>Velocity, amount thresholds, entry-mode escalation. Runs <em>first</em> — before encryption, message building, or the switch. A decline here means nothing below it ever executes.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="n">8</div>
+          <div>
+            <h4>Ops <span class="path">ops/</span></h4>
+            <p>Audit logging with PAN truncated and PIN blocks never written at all, plus a reconciliation job that compares the ledger against the switch's own settlement file by RRN.</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>Extensions</h3>
+      <p>
+        Seven features added on top of the eight-layer foundation, each in its
+        own directory with its own tests.
+      </p>
+
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>Extension</th><th>Where</th><th>The problem it solves</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">Identity model</td><td class="mono">ledger/db.py</td><td>Bare string account identifiers replaced by a real <code>users → accounts → cards</code> hierarchy, created atomically.</td></tr>
+            <tr><td class="mono">Auth</td><td class="mono">auth/</td><td>Hand-rolled HS256 JWT plus PBKDF2 passwords, deliberately separate from the card PIN. Ownership is checked, not just identity.</td></tr>
+            <tr><td class="mono">Redis state</td><td class="mono">cache/</td><td>Idempotency and velocity state were per-process, so a retry on another replica was invisible. Now shared, with an atomic <code>SET NX</code> claim.</td></tr>
+            <tr><td class="mono">KMS</td><td class="mono">security/kms.py</td><td>The HSM base key was <code>os.urandom()</code>, regenerated every start — anything encrypted before a restart became undecryptable after one.</td></tr>
+            <tr><td class="mono">Containers</td><td class="mono">Dockerfile</td><td>Multi-stage build, non-root, OpenShift arbitrary-UID safe. Two replicas sharing one Redis, so the cache layer is finally provable.</td></tr>
+            <tr><td class="mono">ClickHouse</td><td class="mono">analytics/</td><td>An analytical store for the questions the operational ledger is the wrong shape to answer.</td></tr>
+            <tr><td class="mono">ACE transport</td><td class="mono">switch/transport.py</td><td>A second route to the switch: SOAP to IBM App Connect Enterprise, which owns the codec and the socket instead.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============================================ 02 -->
+    <section id="message">
+      <h2><span class="num">02</span>ISO 8583 anatomy</h2>
+      <p class="lede">
+        No field names on the wire. No delimiters. Position is identity, and a
+        bitmap says which fields are present at all.
+      </p>
+
+      <p>
+        A message is three parts: a four-digit <strong>MTI</strong> saying what
+        kind of message this is, a <strong>bitmap</strong> of 64 or 128 bits
+        marking which data elements follow, and then those elements
+        back-to-back in ascending order. Get one field's length wrong and every
+        field after it decodes as garbage.
+      </p>
+
+      <h3>A real purchase request, byte by byte</h3>
+      <p>
+        A <code>$50.00</code> chip purchase on card <code>4532015112830366</code>,
+        as it actually leaves the socket:
+      </p>
+
+      <div class="hex">
+        <table>
+          <tbody>
+            <tr><td>0000</td><td>00 33</td><td>MLI</td><td>51 bytes follow. Two-byte big-endian length header — TCP has no message boundaries of its own.</td></tr>
+            <tr><td>0002</td><td>02 00</td><td>MTI</td><td><code>0200</code> financial request, packed BCD: two digits per byte.</td></tr>
+            <tr><td>0004</td><td>70 3C 04 81 08 E0 80 00</td><td>bitmap</td><td>Bits 2,3,4,11,22,37,49,52,53 set. The high bit of byte 0 is clear, so there is no secondary bitmap.</td></tr>
+            <tr><td>000C</td><td>16 45 32 01 51 12 83 03 66</td><td>DE 2</td><td>PAN. <code>0x16</code> = <strong>16 digits</strong>, then 16 digits packed into 8 bytes. The length counts digits, not bytes.</td></tr>
+            <tr><td>0015</td><td>00 00 00</td><td>DE 3</td><td>Processing code <code>000000</code> — purchase, default account to default account.</td></tr>
+            <tr><td>0018</td><td>00 00 00 00 50 00</td><td>DE 4</td><td>Amount <code>000000005000</code>, twelve digits of minor units. $50.00.</td></tr>
+            <tr><td>001E</td><td>00 01 23</td><td>DE 11</td><td>STAN. The six digits the response will be matched back on.</td></tr>
+            <tr><td>0021</td><td>05 1F</td><td>DE 22</td><td>Entry mode <code>051</code> — chip, PIN verified. Odd length, so a trailing <code>F</code> filler nibble.</td></tr>
+            <tr><td>0023</td><td>30 30 30 31 32 33 34 35 36 37 38 39</td><td>DE 37</td><td>RRN. Alphanumeric, so twelve <em>characters</em> in twelve bytes — not BCD.</td></tr>
+            <tr><td>002F</td><td>08 40</td><td>DE 49</td><td>Currency <code>840</code>, USD.</td></tr>
+            <tr><td>0031</td><td>8F 21 00 FF 9A 0D 1E 7C</td><td>DE 52</td><td>Encrypted PIN block. Eight bytes of ciphertext — <strong>never trimmed</strong>.</td></tr>
+            <tr><td>0039</td><td>00 00 00 00 00 00 00 01</td><td>DE 53</td><td>KSN, so the receiver can re-derive the key that decrypts DE 52.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note crit">
+        <span class="tag">The bug that hid for months</span>
+        <p>
+          Fixed-length text fields are space-padded, so decoding them ends with
+          <code>.rstrip()</code>. DE 52 is not text — it is eight bytes of
+          ciphertext that can <em>coincidentally</em> end in <code>0x20</code>,
+          or any other byte that decodes to whitespace. Stripping it silently
+          destroys real key material, the switch derives a different PIN, and
+          the transaction declines with <code>DE 39 = 55</code>, incorrect PIN.
+        </p>
+        <p>
+          It surfaced as a genuinely flaky test — it only triggers when random
+          ciphertext happens to end in the right byte. The fix is a
+          <code>binary</code> flag on <code>FieldSpec</code> for DE 44, 52, 56,
+          64, 96, 120 and 128, and a regression test that pins the trailing
+          bytes deterministically instead of waiting for luck.
+        </p>
+      </div>
+
+      <h3>Coded fields worth knowing</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>DE</th><th>Name</th><th>Format</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">2</td><td>PAN</td><td class="mono">LLVAR n..19</td><td>Length prefix counts <strong>digits</strong>. 16 digits → <code>LL=16</code>, 8 bytes.</td></tr>
+            <tr><td class="mono">3</td><td>Processing code</td><td class="mono">n 6</td><td><code>TT</code> + from-account + to-account. <code>00</code> purchase, <code>40</code> transfer.</td></tr>
+            <tr><td class="mono">4</td><td>Amount</td><td class="mono">n 12</td><td>Minor units, zero-padded. Never a float, anywhere.</td></tr>
+            <tr><td class="mono">11</td><td>STAN</td><td class="mono">n 6</td><td>Unique per connection. Wraps at 999999. The correlation key.</td></tr>
+            <tr><td class="mono">22</td><td>Entry mode</td><td class="mono">n 3</td><td><code>01</code> manual, <code>05</code> chip, <code>07</code> contactless. Risk input.</td></tr>
+            <tr><td class="mono">37</td><td>RRN</td><td class="mono">an 12</td><td>The business key. Ledger primary key, settlement match key.</td></tr>
+            <tr><td class="mono">39</td><td>Response code</td><td class="mono">an 2</td><td><code>00</code> is the only approval. Everything else is a decline with a reason.</td></tr>
+            <tr><td class="mono">52</td><td>PIN block</td><td class="mono">b 8</td><td>Binary. Never logged, never trimmed.</td></tr>
+            <tr><td class="mono">70</td><td>Network code</td><td class="mono">n 3</td><td><code>001</code> sign-on, <code>002</code> sign-off, <code>301</code> echo.</td></tr>
+            <tr><td class="mono">90</td><td>Original data</td><td class="mono">n 42</td><td>Ties a reversal to the message it reverses.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============================================ 03 -->
+    <section id="purchase">
+      <h2><span class="num">03</span>Purchase flow</h2>
+      <p class="lede">
+        Nine steps, in a fixed order chosen so that everything reversible
+        happens before the one thing that is not.
+      </p>
+
+      <figure>
+        <div class="scroll">
+          <svg viewBox="0 0 760 430" role="img" aria-label="Sequence diagram of a purchase request">
+            <!-- actor headers -->
+            <g>
+              <rect class="box-b" x="0"   y="0" width="96" height="26"/><text class="sm" x="26" y="17">client</text>
+              <rect class="box"   x="112" y="0" width="96" height="26"/><text class="sm" x="132" y="17">API L5</text>
+              <rect class="box"   x="224" y="0" width="96" height="26"/><text class="sm" x="240" y="17">idem/Redis</text>
+              <rect class="box"   x="336" y="0" width="96" height="26"/><text class="sm" x="358" y="17">risk L7</text>
+              <rect class="box"   x="448" y="0" width="96" height="26"/><text class="sm" x="470" y="17">HSM L4</text>
+              <rect class="box-a" x="560" y="0" width="96" height="26"/><text class="sm" x="580" y="17">switch</text>
+              <rect class="box"   x="664" y="0" width="96" height="26"/><text class="sm" x="682" y="17">ledger L6</text>
+            </g>
+            <!-- lifelines -->
+            <g class="life">
+              <path d="M48 26 L48 420"/><path d="M160 26 L160 420"/><path d="M272 26 L272 420"/>
+              <path d="M384 26 L384 420"/><path d="M496 26 L496 420"/><path d="M608 26 L608 420"/>
+              <path d="M712 26 L712 420"/>
+            </g>
+            <defs>
+              <marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 z" fill="var(--ink-soft)"/>
+              </marker>
+              <marker id="ara" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 z" fill="var(--accent)"/>
+              </marker>
+            </defs>
+
+            <text class="tiny" x="4" y="52">1</text>
+            <path class="ln" d="M48 60 L156 60" marker-end="url(#ar)"/>
+            <text class="sm" x="54" y="55">POST /transactions/purchase + JWT</text>
+
+            <text class="tiny" x="4" y="92">2</text>
+            <path class="ln" d="M160 100 L268 100" marker-end="url(#ar)"/>
+            <text class="sm" x="166" y="95">claim(key) — atomic SET NX</text>
+
+            <text class="tiny" x="4" y="132">3</text>
+            <path class="ln" d="M160 140 L708 140" marker-end="url(#ar)"/>
+            <text class="sm" x="166" y="135">resolve card → account, assert ownership</text>
+
+            <text class="tiny" x="4" y="172">4</text>
+            <path class="ln" d="M160 180 L380 180" marker-end="url(#ar)"/>
+            <text class="sm" x="166" y="175">evaluate(card, amount, entry mode)</text>
+            <path class="ln-d" d="M384 196 L164 196" marker-end="url(#ar)"/>
+            <text class="sm" x="200" y="210">approve | review | decline</text>
+
+            <text class="tiny" x="4" y="238">5</text>
+            <path class="ln" d="M160 246 L492 246" marker-end="url(#ar)"/>
+            <text class="sm" x="166" y="241">encrypt_pin_block(pin, pan) → KSN + 8 bytes</text>
+
+            <text class="tiny" x="4" y="278">6</text>
+            <path class="ln-a" d="M160 286 L604 286" marker-end="url(#ara)"/>
+            <text class="sm" x="166" y="281">0200 — MLI framed, BCD packed</text>
+
+            <text class="tiny" x="4" y="318">7</text>
+            <path class="ln-a" d="M608 326 L164 326" marker-end="url(#ara)"/>
+            <text class="sm" x="200" y="321">0210 — DE 39 = 00, matched on STAN</text>
+
+            <text class="tiny" x="4" y="358">8</text>
+            <path class="ln" d="M160 366 L708 366" marker-end="url(#ar)"/>
+            <text class="sm" x="166" y="361">record debit + credit, keyed on RRN</text>
+
+            <text class="tiny" x="4" y="398">9</text>
+            <path class="ln" d="M156 406 L52 406" marker-end="url(#ar)"/>
+            <text class="sm" x="60" y="401">200 OK — approved, rrn, ledger_status</text>
+          </svg>
+        </div>
+        <figcaption>
+          Steps 1–5 are all reversible. Step 6 is the point of no return: once
+          the switch has it, money may have moved. Only step 8 follows, and
+          step 8 is idempotent on RRN.
+        </figcaption>
+      </figure>
+
+      <h3>Why the order is what it is</h3>
+      <p>
+        The idempotency claim is <strong>first</strong>, before risk. If it came
+        after, two concurrent duplicates would both pass risk evaluation before
+        either claimed — and since evaluating <em>records</em> an attempt, a
+        simple retry would count twice against the velocity window and could
+        push a legitimate customer into a decline they did not earn.
+      </p>
+      <p>
+        Risk runs before security and message building because a declined
+        transaction should cost nothing. No key derivation, no bytes on the
+        socket, no ledger row.
+      </p>
+      <p>
+        The ledger is <strong>last</strong>, after the switch has answered. The
+        alternative — write first, then call the switch — means every declined
+        transaction leaves a row to be cleaned up, and a crash between the two
+        leaves the books claiming money moved when it did not.
+      </p>
+    </section>
+
+    <!-- ============================================ 04 -->
+    <section id="cycles">
+      <h2><span class="num">04</span>Cycles</h2>
+      <p class="lede">
+        Four loops that run continuously or on a schedule, independent of any
+        single request.
+      </p>
+
+      <h3>Connection lifecycle</h3>
+      <p>
+        The socket is long-lived, not per-request. Opening a TCP connection and
+        signing on for every transaction would add two round trips to a path
+        measured in milliseconds.
+      </p>
+
+      <figure>
+        <div class="scroll">
+          <svg viewBox="0 0 700 190" role="img" aria-label="Connection lifecycle state machine">
+            <defs>
+              <marker id="ar2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 z" fill="var(--ink-soft)"/>
+              </marker>
+              <marker id="ar3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 z" fill="var(--crit)"/>
+              </marker>
+            </defs>
+
+            <rect class="box" x="14" y="60" width="96" height="38" rx="4"/>
+            <text class="lbl" x="42" y="84">connect</text>
+
+            <rect class="box" x="158" y="60" width="96" height="38" rx="4"/>
+            <text class="lbl" x="180" y="84">sign-on</text>
+            <text class="tiny" x="180" y="112">0800 DE70=001</text>
+
+            <rect class="box-a" x="302" y="60" width="112" height="38" rx="4"/>
+            <text class="lbl" x="322" y="84">receive loop</text>
+
+            <rect class="box" x="462" y="18" width="112" height="34" rx="4"/>
+            <text class="lbl" x="486" y="40">heartbeat</text>
+            <text class="tiny" x="480" y="12">every 3s · 0800 DE70=301</text>
+
+            <rect class="box" x="462" y="106" width="112" height="34" rx="4"/>
+            <text class="lbl" x="490" y="128">backoff</text>
+            <text class="tiny" x="484" y="158">3s, then retry</text>
+
+            <path class="ln" d="M110 79 L154 79" marker-end="url(#ar2)"/>
+            <path class="ln" d="M254 79 L298 79" marker-end="url(#ar2)"/>
+            <path class="ln" d="M414 72 L458 44" marker-end="url(#ar2)"/>
+            <path class="ln" d="M462 30 Q400 4 358 56" marker-end="url(#ar2)"/>
+            <path d="M414 88 L458 118" stroke="var(--crit)" stroke-width="1.2" fill="none" marker-end="url(#ar3)"/>
+            <text class="tiny" x="404" y="112" fill="var(--crit)">drop</text>
+            <path class="ln" d="M462 140 Q220 186 62 100" marker-end="url(#ar2)"/>
+          </svg>
+        </div>
+        <figcaption>
+          Three separate production bugs lived in this loop: a blocking
+          <code>accept()</code> that could not be interrupted, an accepted
+          socket silently inheriting the listener's 0.5&nbsp;s timeout and
+          dropping every idle connection, and an unexpected exception killing
+          the receive thread without clearing the connected flag — so sends
+          kept succeeding while nothing could ever be received again.
+        </figcaption>
+      </figure>
+
+      <h3>Correlation and the reversal cycle</h3>
+      <p>
+        The socket is asynchronous: responses arrive in whatever order the
+        switch produces them, with nothing but DE 11 to say which request each
+        belongs to. <code>CorrelationManager</code> keeps a map of STAN to a
+        waiting caller, and <code>send_and_wait()</code> blocks on an event
+        until the matching response arrives or the timeout expires.
+      </p>
+
+      <pre><code><span class="c"># correlation/tracker.py</span>
+stan = client.next_stan()
+pending = PendingRequest()
+self._pending[stan] = pending
+
+client.send_message(<span class="s">"0200"</span>, fields | {<span class="k">11</span>: stan})
+arrived = pending.event.wait(timeout)
+
+<span class="k">if not</span> arrived:
+    self._send_reversal(<span class="s">"0200"</span>, stan)   <span class="c"># 0400 with DE 90</span>
+    <span class="k">raise</span> TransactionTimeout(...)      <span class="c"># outcome UNKNOWN</span></code></pre>
+
+      <div class="note warn">
+        <span class="tag">A timeout is not a decline</span>
+        <p>
+          When the switch goes silent, the transaction may have been approved
+          and the cardholder already debited — only the response was lost.
+          Reporting "declined" would be a lie that quietly loses someone's
+          money. So the stack sends a <code>0400</code> reversal, returns
+          <code>status: "unknown"</code>, and <strong>writes nothing to the
+          ledger</strong>. Reconciliation is the backstop that catches it
+          against the switch's own settlement file the next day.
+        </p>
+      </div>
+
+      <h3>Idempotency claim</h3>
+      <p>
+        The original pattern was check, process, store — three separate steps.
+        Two concurrent requests with the same brand-new key could both pass the
+        "not seen yet" check before either finished storing, and both would be
+        fully processed. <code>claim()</code> collapses that into one atomic
+        Redis <code>SET NX</code>, with four possible answers:
+      </p>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Outcome</th><th>Meaning</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">new</td><td>This caller won the claim.</td><td>Proceed.</td></tr>
+            <tr><td class="mono">duplicate</td><td>Already fully processed.</td><td>Return the cached response verbatim.</td></tr>
+            <tr><td class="mono">mismatch</td><td>Same key, <em>different</em> body.</td><td><span class="pill crit">400</span> — almost always a client bug.</td></tr>
+            <tr><td class="mono">in_progress</td><td>Another caller holds the claim and has not finished.</td><td><span class="pill warn">409</span> — retry shortly.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Reconciliation</h3>
+      <p>
+        The only place in the stack that checks its own beliefs against an
+        external source of truth — everything else verifies internal
+        self-consistency. Runs daily as a CronJob, matches ledger rows against
+        the switch's settlement file by RRN, and exits non-zero on anything
+        unclean so alerting keys off the exit code rather than parsing output.
+      </p>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Category</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">matched</td><td>Both agree, same amount. The expected case.</td></tr>
+            <tr><td class="mono">only_in_ledger</td><td>We think it happened; the switch has no record. Often a reversal that landed.</td></tr>
+            <tr><td class="mono">only_in_settlement</td><td>The switch says it happened; we have no record. <strong>This is the timeout case.</strong></td></tr>
+            <tr><td class="mono">amount_mismatch</td><td>Both have it, amounts disagree. Always needs a human.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============================================ 05 -->
+    <section id="transport">
+      <h2><span class="num">05</span>Transports &amp; IBM ACE</h2>
+      <p class="lede">
+        Two ways for a transaction to reach the switch, chosen by one
+        environment variable, indistinguishable to everything above.
+      </p>
+
+      <figure>
+        <div class="scroll">
+          <svg viewBox="0 0 700 240" role="img" aria-label="Direct TCP transport versus ACE SOAP transport">
+            <rect class="box-b" x="240" y="6" width="216" height="32"/>
+            <text class="lbl" x="256" y="27">api/routes/transactions.py</text>
+
+            <rect class="box" x="240" y="54" width="216" height="30" rx="4"/>
+            <text class="lbl" x="272" y="74">Iso8583Transport</text>
+            <path class="ln" d="M348 38 L348 54"/>
+
+            <path class="ln" d="M348 84 L348 98 L150 98 L150 116"/>
+            <path class="ln" d="M348 84 L348 98 L548 98 L548 116"/>
+
+            <rect class="box-a" x="46" y="116" width="208" height="76"/>
+            <text class="lbl" x="62" y="136">DirectTcpTransport</text>
+            <text class="sm" x="62" y="154">iso8583/ codec</text>
+            <text class="sm" x="62" y="168">switch/ MLI + socket</text>
+            <text class="sm" x="62" y="182">correlation/ STAN</text>
+
+            <rect class="box-b" x="444" y="116" width="208" height="76"/>
+            <text class="lbl" x="460" y="136">AceSoapTransport</text>
+            <text class="sm" x="460" y="154">SOAP 1.1 / WSDL</text>
+            <text class="sm" x="460" y="168">ACE owns DFDL + socket</text>
+            <text class="sm" x="460" y="182">ACE assigns the STAN</text>
+
+            <text class="tiny" x="88" y="112">ISO8583_TRANSPORT=direct</text>
+            <text class="tiny" x="492" y="112">=ace</text>
+
+            <rect class="box" x="250" y="208" width="196" height="28" rx="14"/>
+            <text class="lbl" x="292" y="226">payment switch</text>
+            <path class="ln-a" d="M150 192 L150 222 L246 222"/>
+            <path class="ln-a" d="M548 192 L548 222 L450 222"/>
+          </svg>
+        </div>
+        <figcaption>
+          The interface is deliberately narrow — no MTI, no DE numbers, no
+          STAN in any signature — because under ACE this process never sees
+          any of them. Anything wider would leak the direct transport's
+          internals into the contract and stop the two being interchangeable.
+        </figcaption>
+      </figure>
+
+      <p>
+        Under <code>ISO8583_TRANSPORT=ace</code> the stack opens no socket to
+        the switch at all. It posts a SOAP envelope to an ACE integration
+        server, which parses and serializes ISO 8583 from a DFDL schema, holds
+        the TCP connection, and does the STAN correlation itself. Layers 1–3
+        do not run.
+      </p>
+
+      <div class="note">
+        <span class="tag">Why layers 1–3 stay anyway</span>
+        <p>
+          The Python codec is not dead code once ACE arrives. It is the
+          executable specification the DFDL schema must agree with, it is what
+          the test suite exercises, and it is what still works when the
+          integration server is down for maintenance. Deleting it would trade
+          a tested implementation for an untested one and lose the reference.
+        </p>
+      </div>
+
+      <p>
+        The IBM entitlement had not come through when this was built, so the
+        ACE artifacts — DFDL schema, WSDL, ESQL, message-flow specification —
+        live in the companion <code>microfinance-microservices</code>
+        repository under <code>ace/</code>, alongside <code>ace-stub</code>: a
+        Python service serving the identical WSDL that this transport can be
+        pointed at today, with no licence at all.
+      </p>
+    </section>
+
+    <!-- ============================================ 06 -->
+    <section id="api">
+      <h2><span class="num">06</span>API reference</h2>
+      <p class="lede">
+        Notice what is absent from every schema: no MTI, no DE numbers, no
+        STAN, no bitmap. A client of this API should never need to know any of
+        it.
+      </p>
+
+      <h3>Identity</h3>
+
+      <div class="ep">
+        <header><span class="pill post">POST</span><span class="path">/users/register</span><span class="auth">public</span></header>
+        <div class="body">
+          <p>Creates a user, a wallet account, and a bound card in one atomic transaction. All three or none.</p>
+          <pre><code>{ <span class="s">"full_name"</span>: <span class="s">"Ayesha Khan"</span>,
+  <span class="s">"cnic"</span>: <span class="s">"3520212345678"</span>,      <span class="c">// 13 digits, unique</span>
+  <span class="s">"bind_card_number"</span>: <span class="s">"4532015112830366"</span>,
+  <span class="s">"password"</span>: <span class="s">"min-8-chars"</span> }   <span class="c">// NOT the card PIN</span>
+
+<span class="c">→ 200</span> { <span class="s">"status"</span>: <span class="s">"success"</span>, <span class="s">"user_id"</span>: <span class="s">"usr_a1b2c3d4"</span>,
+        <span class="s">"account_id"</span>: <span class="s">"acc_e5f6a7b8"</span> }
+<span class="c">→ 400</span> CNIC or card already registered</code></pre>
+        </div>
+      </div>
+
+      <div class="ep">
+        <header><span class="pill post">POST</span><span class="path">/auth/login</span><span class="auth">public</span></header>
+        <div class="body">
+          <p>Verifies the password locally and issues an HS256 JWT valid for one hour. No switch, no HSM — this is app-level auth, not a card transaction.</p>
+          <pre><code>{ <span class="s">"cnic"</span>: <span class="s">"3520212345678"</span>, <span class="s">"password"</span>: <span class="s">"..."</span> }
+
+<span class="c">→ 200</span> { <span class="s">"access_token"</span>: <span class="s">"eyJhbGci..."</span>, <span class="s">"token_type"</span>: <span class="s">"bearer"</span>,
+        <span class="s">"expires_in_seconds"</span>: <span class="k">3600</span> }
+<span class="c">→ 401</span> <span class="s">"Invalid CNIC or password."</span>
+       <span class="c">// deliberately identical for "no such user" and "wrong
+       // password" — distinguishing them enumerates valid CNICs</span></code></pre>
+        </div>
+      </div>
+
+      <h3>Money</h3>
+
+      <div class="ep">
+        <header><span class="pill post">POST</span><span class="path">/transactions/purchase</span><span class="auth">Bearer + ownership</span></header>
+        <div class="body">
+          <p>The main path. Runs the full nine-step flow in section 03.</p>
+          <pre><code>{ <span class="s">"amount"</span>: <span class="k">50.00</span>,                <span class="c">// whole currency units</span>
+  <span class="s">"card_number"</span>: <span class="s">"4532015112830366"</span>,
+  <span class="s">"pin"</span>: <span class="s">"1234"</span>,
+  <span class="s">"idempotency_key"</span>: <span class="s">"client-generated-uuid"</span>,
+  <span class="s">"entry_mode"</span>: <span class="s">"05"</span> }              <span class="c">// DE 22; 01 = manual key entry</span>
+
+<span class="c">→ 200</span> { <span class="s">"status"</span>: <span class="s">"approved"</span>,
+        <span class="s">"reason"</span>: <span class="s">"Approved / completed successfully"</span>,
+        <span class="s">"authorization_id"</span>: <span class="s">"A18008"</span>,
+        <span class="s">"stan"</span>: <span class="s">"000123"</span>,
+        <span class="s">"rrn"</span>: <span class="s">"176073120042"</span>,
+        <span class="s">"ledger_status"</span>: <span class="s">"recorded"</span> }</code></pre>
+          <p><strong>Five possible values for <code>status</code>:</strong></p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>status</th><th>Ledger written?</th><th>Meaning</th></tr></thead>
+              <tbody>
+                <tr><td><span class="pill ok">approved</span></td><td>yes</td><td>DE 39 = 00. Money moved and is recorded.</td></tr>
+                <tr><td><span class="pill crit">declined</span></td><td>no</td><td>The issuer refused. <code>reason</code> carries the decoded DE 39 text.</td></tr>
+                <tr><td><span class="pill warn">review</span></td><td>no</td><td>Risk flagged it. Never reached the switch.</td></tr>
+                <tr><td><span class="pill crit">decline</span></td><td>no</td><td>Risk refused it outright. Never reached the switch.</td></tr>
+                <tr><td><span class="pill warn">unknown</span></td><td><strong>no</strong></td><td>Switch timed out. A reversal was sent; the outcome is genuinely undetermined and reconciliation will resolve it.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p><span class="pill crit">400</span> idempotency key reused with a different body · <span class="pill warn">409</span> claim held by another in-flight request · <span class="pill crit">403</span> the token's user does not own this card · <span class="pill crit">404</span> card or merchant not registered</p>
+        </div>
+      </div>
+
+      <div class="ep">
+        <header><span class="pill post">POST</span><span class="path">/transactions/transfer</span><span class="auth">Bearer + ownership</span></header>
+        <div class="body">
+          <p>Same saga, processing code <code>400000</code>, and the recipient's real wallet ID travels in DE 103.</p>
+          <pre><code>{ <span class="s">"amount"</span>: <span class="k">120.00</span>,
+  <span class="s">"sender_card_number"</span>: <span class="s">"4532015112830366"</span>,
+  <span class="s">"sender_pin"</span>: <span class="s">"1234"</span>,
+  <span class="s">"recipient_account"</span>: <span class="s">"acc_e5f6a7b8"</span>,
+  <span class="s">"idempotency_key"</span>: <span class="s">"..."</span> }</code></pre>
+        </div>
+      </div>
+
+      <div class="ep">
+        <header><span class="pill get">GET</span><span class="path">/ledger/balance/{identifier}</span><span class="auth">Bearer + ownership</span></header>
+        <div class="body">
+          <p>Accepts a card number, a raw account ID, or a merchant identifier — <code>resolve_account()</code> translates all three.</p>
+          <pre><code><span class="c">→ 200</span> { <span class="s">"provided_identifier"</span>: <span class="s">"4532015112830366"</span>,
+        <span class="s">"resolved_wallet_id"</span>: <span class="s">"acc_e5f6a7b8"</span>,
+        <span class="s">"balance_usd"</span>: <span class="k">-50.0</span> }</code></pre>
+        </div>
+      </div>
+
+      <h3>Operations</h3>
+
+      <div class="ep">
+        <header><span class="pill get">GET</span><span class="path">/health</span><span class="auth">public</span></header>
+        <div class="body">
+          <p>Reports the transport in use and whether the path to the switch is genuinely alive — under ACE that means a real echo test through to the switch, not just a live process.</p>
+          <pre><code><span class="c">→ 200</span> { <span class="s">"status"</span>: <span class="s">"ok"</span>,
+        <span class="s">"transport"</span>: <span class="s">"DirectTcpTransport"</span>,
+        <span class="s">"switch_connected"</span>: <span class="k">true</span> }</code></pre>
+        </div>
+      </div>
+
+      <div class="ep">
+        <header><span class="pill post">POST</span><span class="path">/ledger/reset</span><span class="auth">Bearer</span></header>
+        <div class="body">
+          <p>Wipes the ledger and the idempotency cache. Sandbox only.</p>
+          <div class="note crit" style="margin:0.5rem 0 0;">
+            <span class="tag">Known gap</span>
+            <p>Requires a valid token but <em>not</em> an admin role — this project has no role system, so any authenticated user can wipe the entire ledger. Auth here only rules out anonymous callers. Real RBAC is a follow-up, not something this endpoint solves.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================ 07 -->
+    <section id="data">
+      <h2><span class="num">07</span>Data model</h2>
+      <p class="lede">
+        Five tables. The interesting constraints are the ones that make
+        incorrect states impossible rather than merely unlikely.
+      </p>
+
+      <figure>
+        <div class="scroll">
+          <svg viewBox="0 0 700 250" role="img" aria-label="Entity relationship diagram">
+            <rect class="box" x="16" y="16" width="150" height="66"/>
+            <text class="lbl" x="28" y="36">users</text>
+            <text class="tiny" x="28" y="52">user_id PK</text>
+            <text class="tiny" x="28" y="64">cnic UNIQUE</text>
+            <text class="tiny" x="28" y="76">password_hash</text>
+
+            <rect class="box" x="216" y="16" width="150" height="66"/>
+            <text class="lbl" x="228" y="36">accounts</text>
+            <text class="tiny" x="228" y="52">account_id PK</text>
+            <text class="tiny" x="228" y="64">user_id FK</text>
+            <text class="tiny" x="228" y="76">type</text>
+
+            <rect class="box" x="416" y="16" width="150" height="66"/>
+            <text class="lbl" x="428" y="36">cards</text>
+            <text class="tiny" x="428" y="52">card_number PK</text>
+            <text class="tiny" x="428" y="64">account_id FK</text>
+            <text class="tiny" x="428" y="76">status</text>
+
+            <rect class="box-a" x="216" y="150" width="150" height="66"/>
+            <text class="lbl" x="228" y="170">transactions</text>
+            <text class="tiny" x="228" y="186">rrn PK ← the guarantee</text>
+            <text class="tiny" x="228" y="198">amount_cents</text>
+            <text class="tiny" x="228" y="210">created_at</text>
+
+            <rect class="box" x="416" y="150" width="180" height="66"/>
+            <text class="lbl" x="428" y="170">ledger_entries</text>
+            <text class="tiny" x="428" y="186">rrn FK · account_id FK</text>
+            <text class="tiny" x="428" y="198">entry_type debit|credit</text>
+            <text class="tiny" x="428" y="210">amount_cents</text>
+
+            <path class="ln" d="M166 49 L212 49"/><text class="tiny" x="176" y="44">1..n</text>
+            <path class="ln" d="M366 49 L412 49"/><text class="tiny" x="376" y="44">1..n</text>
+            <path class="ln" d="M366 183 L412 183"/><text class="tiny" x="374" y="178">1..2</text>
+            <path class="ln-d" d="M291 82 L291 150"/><text class="tiny" x="296" y="120">via entries</text>
+          </svg>
+        </div>
+        <figcaption>
+          Every transaction produces exactly two ledger entries — one debit,
+          one credit, same RRN, same amount. Total debits across the whole
+          table must always equal total credits.
+        </figcaption>
+      </figure>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Constraint</th><th>Stops</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">transactions.rrn PRIMARY KEY</td><td>Double-processing, at the database level, regardless of replica count. A duplicate insert raises and is reported as <code>already_recorded</code>.</td></tr>
+            <tr><td class="mono">entry_type CHECK IN ('debit','credit')</td><td>A typo creating a third entry class that no balance query would ever count.</td></tr>
+            <tr><td class="mono">ledger_entries.account_id REFERENCES</td><td>Posting money to an account that does not exist.</td></tr>
+            <tr><td class="mono">users.cnic UNIQUE</td><td>Two identities for one person.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note warn">
+        <span class="tag">Same exception, opposite meanings</span>
+        <p>
+          SQLite raises the <em>same</em> <code>IntegrityError</code> for a
+          duplicate primary key and for a foreign-key violation. Only the first
+          is safe to report as "already recorded". Swallowing the second would
+          turn "you posted to an account that does not exist" into a reassuring
+          success message, and the money would simply not be recorded anywhere.
+          They are told apart by SQLite's own error text, which is stable
+          across versions.
+        </p>
+      </div>
+    </section>
+
+    <!-- ============================================ 08 -->
+    <section id="analytics">
+      <h2><span class="num">08</span>ClickHouse</h2>
+      <p class="lede">
+        The ledger answers "does this account have the funds, right now".
+        The warehouse answers "what was volume by day across the last year".
+        One engine being good at both is rare.
+      </p>
+
+      <p>
+        This was originally Redshift. <code>RedshiftWarehouse</code> was
+        correct-shaped code that could never actually be run — no AWS account,
+        no cluster, no credentials — so it sat in exactly the position
+        <code>AWSKeyManagementService</code> still occupies: honest about being
+        untestable, and untested. ClickHouse self-hosts in a container, so the
+        warehouse tests now execute real SQL against a real server. For the one
+        component whose entire job is to be trusted with reporting numbers,
+        that is a strictly better place to be.
+      </p>
+
+      <pre><code><span class="k">CREATE TABLE</span> fact_transactions (
+    rrn                String,
+    amount_cents       Int64,
+    transaction_ts     DateTime64(3, <span class="s">'UTC'</span>),
+    debit_account_id   LowCardinality(String),   <span class="c">-- dictionary encoded</span>
+    credit_account_id  LowCardinality(String),
+    loaded_at          DateTime64(3, <span class="s">'UTC'</span>) <span class="k">DEFAULT</span> now64(3)
+)
+<span class="k">ENGINE</span> = ReplacingMergeTree(loaded_at)
+<span class="k">PARTITION BY</span> toYYYYMM(transaction_ts)   <span class="c">-- TTL becomes DROP PARTITION</span>
+<span class="k">ORDER BY</span> (transaction_ts, rrn)         <span class="c">-- also the dedup key</span>
+<span class="k">TTL</span> toDateTime(transaction_ts) + <span class="k">INTERVAL</span> 7 <span class="k">YEAR</span>;</code></pre>
+
+      <p>
+        The loading model inverts from Redshift's. Redshift punishes row-by-row
+        <code>INSERT</code> and wants <code>COPY FROM S3</code> — an S3 bucket,
+        an IAM role, a staging table, <code>MERGE</code> grammar. ClickHouse
+        wants large batched inserts and needs none of it. Several hundred lines
+        of planned infrastructure simply stopped existing.
+      </p>
+
+      <div class="note crit">
+        <span class="tag">Two traps, both pinned by tests</span>
+        <p>
+          <strong>Deduplication is eventual.</strong>
+          <code>ReplacingMergeTree</code> collapses rows during background
+          merges, at an unpredictable time. A <code>SELECT count()</code> run
+          between an insert and its merge genuinely sees both copies. Any query
+          that must not see duplicates says <code>FINAL</code>.
+        </p>
+        <p>
+          <strong>Materialized views fire before deduplication.</strong>
+          <code>mv_daily_volume</code> runs on <code>INSERT</code>, so
+          re-loading a duplicate RRN double-counts in the aggregate even though
+          the fact table self-corrects. That is why the sync advances its
+          watermark only after a batch is confirmed — the watermark is what
+          keeps the aggregates honest, not merely what makes the sync fast.
+        </p>
+      </div>
+
+      <p>
+        The old cross-engine timestamp bug is fixed differently and more
+        simply. Comparing timestamps as text across SQLite and Postgres used to
+        break incremental sync, because Postgres's plain <code>TIMESTAMP</code>
+        drops the UTC offset SQLite's string format carries — so every sync
+        re-processed the same rows forever, saved from real duplicates only by
+        <code>ON CONFLICT DO NOTHING</code>, which is luck rather than
+        correctness. The watermark is now stored as the <em>exact string the
+        source emitted</em> and fed back verbatim. No parse, nothing to lose.
+      </p>
+    </section>
+
+    <!-- ============================================ 09 -->
+    <section id="failure">
+      <h2><span class="num">09</span>Failure modes</h2>
+      <p class="lede">
+        What breaks, what the stack does about it, and what it deliberately
+        does not attempt.
+      </p>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Failure</th><th>Detected by</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>Switch stops answering mid-transaction</td><td>Layer 3 timeout</td><td><code>0400</code> reversal sent, <code>status: unknown</code>, <strong>no ledger write</strong>. Reconciliation resolves it.</td></tr>
+            <tr><td>Connection drops</td><td>Receive loop exception</td><td><code>_connected</code> cleared in a <code>finally</code>, backoff, reconnect, re-sign-on.</td></tr>
+            <tr><td>Duplicate request, same key</td><td>Redis <code>SET NX</code></td><td>Cached response returned. The switch is never contacted a second time.</td></tr>
+            <tr><td>Duplicate RRN reaches the ledger</td><td><code>PRIMARY KEY</code></td><td><code>already_recorded</code>. Nothing applied twice.</td></tr>
+            <tr><td>Velocity attack across replicas</td><td>Redis sorted set</td><td>Shared sliding window; splitting attempts between pods does not evade it.</td></tr>
+            <tr><td>Process restart</td><td>—</td><td>HSM base key is KMS-wrapped on disk, so PIN blocks encrypted before the restart still decrypt after it.</td></tr>
+            <tr><td>Ledger stops balancing</td><td><code>is_balanced()</code></td><td>Surfaced, not auto-corrected. A ledger that does not balance needs a human, not a retry.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Not solved, and known</h3>
+      <ul>
+        <li><strong>No MAC on outbound messages.</strong> DE 64 and 128 are modelled and masked but never generated. Most real switches require one.</li>
+        <li><strong>DE 90 uses placeholder institution IDs</strong> in reversals. The simulator only needs MTI and STAN; a real switch will want the genuine values echoed from the original.</li>
+        <li><strong><code>MockHSM</code> encrypts with XOR.</strong> Same interface a real HSM client exposes, no tamper resistance whatsoever. Never point this at real cards.</li>
+        <li><strong>No RBAC.</strong> Any authenticated user is equivalent to any other, including for <code>/ledger/reset</code>.</li>
+        <li><strong>RRN collision is possible</strong> — ten digits of epoch seconds plus two random gives a 1-in-100 chance within the same second. The <code>PRIMARY KEY</code> turns a collision into a rejected duplicate rather than corrupted money, but the format should change before real volume.</li>
+      </ul>
+    </section>
+
+    <!-- ============================================ 10 -->
+    <section id="deploy">
+      <h2><span class="num">10</span>Deployment</h2>
+
+      <pre><code><span class="c"># local, single process, zero setup</span>
+uvicorn api.main:app --reload
+
+<span class="c"># two replicas sharing one Redis -- the point of the cache layer</span>
+docker compose up --build
+python3 verify_cross_replica.py</code></pre>
+
+      <h3>Configuration</h3>
+      <p>
+        Every integration follows the same opt-in pattern: unset means the
+        behaviour that needs no external setup, and the alternative is one
+        variable away.
+      </p>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Variable</th><th>Unset</th><th>Set</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">REDIS_URL</td><td>In-memory idempotency and velocity. One replica only.</td><td>Shared across every replica.</td></tr>
+            <tr><td class="mono">HSM_MASTER_KEY_HEX</td><td>Ephemeral base key, regenerated each start.</td><td>KMS-wrapped and persisted across restarts.</td></tr>
+            <tr><td class="mono">ISO8583_TRANSPORT</td><td><code>direct</code> — built-in codec and socket.</td><td><code>ace</code> — SOAP to an ACE integration server.</td></tr>
+            <tr><td class="mono">JWT_SECRET</td><td>A published development default. Warns loudly at boot.</td><td>Real signing key. Must be shared by every replica.</td></tr>
+            <tr><td class="mono">RUN_LOCAL_SIMULATOR</td><td>Starts the fake switch in-process.</td><td>Points at a real switch instead.</td></tr>
+            <tr><td class="mono">CLICKHOUSE_HOST</td><td>Warehouse sync is simply not run.</td><td>Hourly incremental load.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>OpenShift notes</h3>
+      <p>
+        The image is built for OpenShift's arbitrary-UID model: packages are
+        installed system-wide rather than into a named user's home, and
+        <code>chgrp -R 0 /app && chmod -R g=u /app</code> grants GID 0 the
+        owner's permissions, because whatever random UID OpenShift assigns is
+        always a member of the root group.
+      </p>
+      <div class="note warn">
+        <span class="tag">Not a permission error</span>
+        <p>
+          Getting the arbitrary-UID handling wrong surfaces as
+          <code>executable file not found in $PATH</code> — not as a permission
+          denial — which sends you looking in entirely the wrong place. The
+          file genuinely exists; the assigned UID just cannot read the home
+          directory it was installed into.
+        </p>
+      </div>
+      <div class="note crit">
+        <span class="tag">Before scaling past one replica</span>
+        <p>
+          The ledger is SQLite inside the container, so each replica has its
+          own private books. That is why <code>verify_cross_replica.py</code>
+          registers its user on one specific replica and can only prove
+          <em>Redis</em> state is shared. Above one replica this is a genuine
+          data-correctness problem, not a cosmetic one — point the ledger at
+          Postgres first, or pin <code>replicas: 1</code> with a PVC.
+        </p>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    microfinance-stack · architecture reference<br>
+    Companion document: microfinance-microservices — the same eight layers,
+    decomposed into seven OpenShift services with a SOAP hop at the ACE boundary.
+  </footer>
+
+</div>

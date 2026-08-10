@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from switch.client import ISO8583Client
 from switch.host_simulator import HostSimulator
+from switch.transport import build_transport
 from correlation.tracker import CorrelationManager
 from security.mock_hsm import MockHSM
 from ledger.db import init_db
@@ -34,6 +35,20 @@ from api.routes import transactions, health, users, auth
 SWITCH_HOST = os.environ.get("SWITCH_HOST", "127.0.0.1")
 SWITCH_PORT = int(os.environ.get("SWITCH_PORT", "9999"))
 RUN_LOCAL_SIMULATOR = os.environ.get("RUN_LOCAL_SIMULATOR", "1") == "1"
+
+# How transactions reach the switch. See switch/transport.py.
+#
+#   direct -- Stages 1-3 as built: this process owns the codec, the socket,
+#             and STAN correlation. The default; needs nothing external.
+#   ace    -- SOAP to an IBM ACE integration server, which owns all of it.
+#             ACE parses and serializes ISO 8583 from a DFDL schema and holds
+#             the TCP connection itself, so none of Stages 1-3 run here.
+#
+# When ISO8583_TRANSPORT=ace, this process opens no socket to the switch at
+# all -- so the local simulator and the ISO8583Client below are skipped
+# entirely rather than started and left idle.
+ISO8583_TRANSPORT = os.environ.get("ISO8583_TRANSPORT", "direct").lower()
+USE_ACE = ISO8583_TRANSPORT == "ace"
 
 # Same pattern as RUN_LOCAL_SIMULATOR: unset by default, so local dev needs
 # no Redis at all. Set REDIS_URL to opt into shared, horizontal-scaling-safe
@@ -57,35 +72,47 @@ if JWT_SECRET == _DEV_DEFAULT_JWT_SECRET:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Start the Host Simulator (Bank Switch)
-    if RUN_LOCAL_SIMULATOR:
-        app.state.simulator = HostSimulator(host=SWITCH_HOST, port=SWITCH_PORT)
-        app.state.simulator.start()
-        time.sleep(0.2)
+    if USE_ACE:
+        # ACE owns the codec, the framing, the socket, and STAN correlation,
+        # so none of Stages 1-3 start here. Starting a simulator and a client
+        # that nothing would ever use would just be two idle threads and a
+        # misleading /health answer.
+        app.state.simulator = None
+        app.state.client = None
+        app.state.correlator = None
+        app.state.audit_logger = AuditLogger()
+        app.state.transport = build_transport()
+    else:
+        # 1. Start the Host Simulator (Bank Switch)
+        if RUN_LOCAL_SIMULATOR:
+            app.state.simulator = HostSimulator(host=SWITCH_HOST, port=SWITCH_PORT)
+            app.state.simulator.start()
+            time.sleep(0.2)
 
-    # 2. Connect the ISO8583 Client to the Switch
-    app.state.client = ISO8583Client(
-        SWITCH_HOST, 
-        SWITCH_PORT, 
-        heartbeat_interval=3,
-        audit_logger=AuditLogger()
-    )
-    app.state.client.connect()
-    
-    # 3. Wait for the connection to fully establish
-    connect_deadline = time.monotonic() + 10
-    while not app.state.client._connected.is_set():
-        if time.monotonic() > connect_deadline:
-            raise RuntimeError(
-                f"Could not connect to switch at {SWITCH_HOST}:{SWITCH_PORT} within 10s. "
-                "If RUN_LOCAL_SIMULATOR=1, check nothing else is using that port, and check "
-                "whether a firewall prompt is waiting for approval."
-            )
-        time.sleep(0.05)
+        # 2. Connect the ISO8583 Client to the Switch
+        app.state.client = ISO8583Client(
+            SWITCH_HOST,
+            SWITCH_PORT,
+            heartbeat_interval=3,
+            audit_logger=AuditLogger()
+        )
+        app.state.client.connect()
 
-    # 4. Wire up all the Microfinance Services
-    app.state.audit_logger = app.state.client.audit_logger
-    app.state.correlator = CorrelationManager(app.state.client, timeout_seconds=10)
+        # 3. Wait for the connection to fully establish
+        connect_deadline = time.monotonic() + 10
+        while not app.state.client._connected.is_set():
+            if time.monotonic() > connect_deadline:
+                raise RuntimeError(
+                    f"Could not connect to switch at {SWITCH_HOST}:{SWITCH_PORT} within 10s. "
+                    "If RUN_LOCAL_SIMULATOR=1, check nothing else is using that port, and check "
+                    "whether a firewall prompt is waiting for approval."
+                )
+            time.sleep(0.05)
+
+        # 4. Wire up all the Microfinance Services
+        app.state.audit_logger = app.state.client.audit_logger
+        app.state.correlator = CorrelationManager(app.state.client, timeout_seconds=10)
+        app.state.transport = build_transport(app.state.client, app.state.correlator)
 
     if HSM_KEY_PERSISTENCE_PATH and HSM_MASTER_KEY_HEX:
         kms = LocalKeyManagementService(master_key=bytes.fromhex(HSM_MASTER_KEY_HEX))
@@ -123,8 +150,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # 6. Teardown on shutdown
-    app.state.client.close()
-    if RUN_LOCAL_SIMULATOR:
+    app.state.transport.close()
+    if app.state.simulator is not None:
         app.state.simulator.stop()
 
 

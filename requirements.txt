@@ -1,7 +1,12 @@
-fastapi
+﻿fastapi
 uvicorn
 httpx
 redis
 cryptography
-psycopg2-binary
-redshift_connector
+
+# ClickHouse, the analytics warehouse. Replaced redshift_connector: Redshift
+# needed an AWS account and a provisioned cluster, so that integration could
+# never actually be run here. ClickHouse self-hosts in a container, which is
+# why analytics/tests/test_warehouse.py now executes real SQL instead of
+# asserting by inspection.
+clickhouse-connect

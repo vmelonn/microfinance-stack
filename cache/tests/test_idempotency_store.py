@@ -14,14 +14,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from cache.idempotency_store import InMemoryIdempotencyStore, RedisIdempotencyStore
 
 
+def _redis_or_none():
+    """
+    A live Redis on db 15, or None if there isn't one.
+
+    Without this the whole file ERRORS when no Redis is running, which makes
+    "you didn't start a container" indistinguishable from "the code is
+    broken". The in-memory half still runs unconditionally, so nothing
+    silently stops being tested -- a test that quietly disappears is worse
+    than one that fails, because the suite still reports green.
+    """
+    try:
+        import redis
+
+        client = redis.Redis(host="127.0.0.1", port=6379, db=15)  # db 15 -- away from real data
+        client.ping()
+        client.flushdb()
+        return client
+    except Exception:
+        return None
+
+
 def _make_stores():
-    import redis
-    r = redis.Redis(host="127.0.0.1", port=6379, db=15)  # db 15 -- keep test data out of the way
-    r.flushdb()
-    return {
-        "in-memory": InMemoryIdempotencyStore(),
-        "redis": RedisIdempotencyStore(r),
-    }
+    stores = {"in-memory": InMemoryIdempotencyStore()}
+
+    client = _redis_or_none()
+    if client is not None:
+        stores["redis"] = RedisIdempotencyStore(client)
+    else:
+        print("  [skip] no Redis on 127.0.0.1:6379 -- in-memory only. "
+              "Start one with: docker run -d -p 6379:6379 redis:7-alpine")
+
+    return stores
 
 
 def test_first_claim_is_new():

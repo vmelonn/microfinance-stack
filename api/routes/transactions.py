@@ -114,34 +114,46 @@ def purchase(body: PurchaseRequest, request: Request, user: dict = Depends(get_c
         state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
         return result
 
-    # -- Step 3: Security layer 
+    # -- Step 3: Security layer
     ksn, encrypted_pin_block = state.hsm.encrypt_pin_block(body.pin, body.card_number)
-    de52_value = encrypted_pin_block.decode("latin-1")
 
-    # -- Step 4: Build ISO 8583 Message
+    # -- Step 4+5: Send to the switch, via whichever transport is configured.
+    # Under ISO8583_TRANSPORT=direct this builds the message and correlates
+    # by STAN locally; under =ace it becomes a SOAP call and ACE does all of
+    # that. This code cannot tell the difference, which is the point.
     rrn = _generate_rrn()
-    fields = {
-        2: body.card_number,
-        3: "000000",   # 00 = Purchase
-        4: _amount_to_minor_units(body.amount),
-        22: body.entry_mode,
-        37: rrn,
-        49: "840",
-        52: de52_value,
-        53: ksn.rjust(16, "0"),
-    }
+    auth = state.transport.authorize(
+        pan=body.card_number,
+        processing_code="000000",          # 00 = purchase
+        amount_minor=_amount_to_minor_units(body.amount),
+        entry_mode=body.entry_mode,
+        rrn=rrn,
+        currency_code="840",
+        pin_block=encrypted_pin_block,
+        ksn=ksn,
+    )
 
-    # -- Step 5: Send and wait 
-    try:
-        response = state.correlator.send_and_wait("0200", fields)
-    except Exception as e:
-        result = PurchaseResponse(status="error", reason=str(e))
+    if auth.outcome == "unknown":
+        # THE CASE THAT DID NOT EXIST BEFORE A TIMEOUT WAS MODELLED HONESTLY.
+        # The switch may have approved and debited the cardholder, and only
+        # the response was lost. Recording a ledger posting would invent a
+        # transaction that may never have happened; recording nothing and
+        # reporting "declined" would hide one that did.
+        #
+        # So: no posting, and the caller is told explicitly. Daily
+        # reconciliation (ops/reconciliation.py) is the backstop that catches
+        # it against the switch's own settlement file.
+        result = PurchaseResponse(
+            status="unknown",
+            reason=(auth.response_text or "Switch outcome could not be determined.")
+                   + " Not recorded in the ledger; awaiting reconciliation.",
+            rrn=rrn,
+        )
         state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
         return result
 
-    response_code = response["fields"].get(39, "")
-    if response_code == "00":
-        confirmed_rrn = response["fields"].get(37, rrn)
+    if auth.outcome == "approved":
+        confirmed_rrn = auth.rrn or rrn
 
         # -- Step 6: Ledger layer (Using the real, mapped Database IDs)
         ledger_conn = get_connection(state.ledger_db_path)
@@ -156,14 +168,19 @@ def purchase(body: PurchaseRequest, request: Request, user: dict = Depends(get_c
 
         result = PurchaseResponse(
             status="approved",
-            reason="Approved",
-            authorization_id=response["fields"].get(38),
-            stan=response["fields"].get(11),
+            reason=auth.response_text or "Approved",
+            authorization_id=auth.authorization_id,
+            stan=auth.stan,
             rrn=confirmed_rrn,
             ledger_status=ledger_result["status"],
         )
     else:
-        result = PurchaseResponse(status="declined", reason="Declined by Host", stan=response["fields"].get(11), rrn=rrn)
+        result = PurchaseResponse(
+            status="declined",
+            reason=auth.response_text or "Declined by Host",
+            stan=auth.stan,
+            rrn=rrn,
+        )
 
     state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
     return result
@@ -260,57 +277,63 @@ def transfer(body: TransferRequest, request: Request, user: dict = Depends(get_c
         state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
         return result
 
-    # -- Step 3: Security layer 
+    # -- Step 3: Security layer
     ksn, encrypted_pin_block = state.hsm.encrypt_pin_block(body.sender_pin, body.sender_card_number)
-    de52_value = encrypted_pin_block.decode("latin-1")
 
-    # -- Step 4: Build ISO 8583 Message
+    # -- Step 4+5: Same transport indirection as purchase(). DE 3 = 400000
+    # (transfer between accounts) and DE 103 carries the credit side.
     rrn = _generate_rrn()
-    fields = {
-        2: body.sender_card_number,
-        3: "400000",   
-        4: _amount_to_minor_units(body.amount),
-        22: "01",
-        37: rrn,
-        49: "840",
-        52: de52_value,
-        53: ksn.rjust(16, "0"),
-        103: recipient_acc  # Send the actual database Wallet ID to the bank!
-    }
+    auth = state.transport.authorize(
+        pan=body.sender_card_number,
+        processing_code="400000",
+        amount_minor=_amount_to_minor_units(body.amount),
+        entry_mode="01",
+        rrn=rrn,
+        currency_code="840",
+        pin_block=encrypted_pin_block,
+        ksn=ksn,
+        account_id_2=recipient_acc,   # the real wallet ID, not a placeholder
+    )
 
-    # -- Step 5: Send and wait 
-    try:
-        response = state.correlator.send_and_wait("0200", fields)
-    except Exception as e:
-        result = TransferResponse(status="error", reason=str(e))
+    if auth.outcome == "unknown":
+        result = TransferResponse(
+            status="unknown",
+            reason=(auth.response_text or "Switch outcome could not be determined.")
+                   + " Not recorded in the ledger; awaiting reconciliation.",
+            rrn=rrn,
+        )
         state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
         return result
 
-    response_code = response["fields"].get(39, "")
-    if response_code == "00":
-        confirmed_rrn = response["fields"].get(37, rrn)
+    if auth.outcome == "approved":
+        confirmed_rrn = auth.rrn or rrn
 
         # -- Step 6: Ledger layer (Using the real, mapped Database IDs)
         ledger_conn = get_connection(state.ledger_db_path)
         ledger_result = record_purchase(
             ledger_conn,
             rrn=confirmed_rrn,
-            debit_account=sender_acc,      # No more fake "card:1111" string!
-            credit_account=recipient_acc,  # No more fake "account:mike" string!
+            debit_account=sender_acc,
+            credit_account=recipient_acc,
             amount_cents=amount_cents,
         )
         ledger_conn.close()
 
         result = TransferResponse(
             status="approved",
-            reason="Approved",
-            authorization_id=response["fields"].get(38),
-            stan=response["fields"].get(11),
+            reason=auth.response_text or "Approved",
+            authorization_id=auth.authorization_id,
+            stan=auth.stan,
             rrn=confirmed_rrn,
             ledger_status=ledger_result["status"],
         )
     else:
-        result = TransferResponse(status="declined", reason="Declined by Host", stan=response["fields"].get(11), rrn=rrn)
+        result = TransferResponse(
+            status="declined",
+            reason=auth.response_text or "Declined by Host",
+            stan=auth.stan,
+            rrn=rrn,
+        )
 
     state.idempotency_store.store_response(body.idempotency_key, result.model_dump())
     return result

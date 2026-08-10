@@ -14,13 +14,28 @@ from cache.velocity_tracker import InMemoryVelocityTracker, RedisVelocityTracker
 
 
 def _make_trackers():
-    import redis
-    r = redis.Redis(host="127.0.0.1", port=6379, db=15)
-    r.flushdb()
-    return {
-        "in-memory": InMemoryVelocityTracker(),
-        "redis": RedisVelocityTracker(r),
-    }
+    """
+    Both implementations when Redis is up, in-memory alone when it is not.
+
+    Same reasoning as test_idempotency_store.py: erroring the whole file
+    because no container is running makes a missing dependency look like a
+    code failure, while silently dropping the in-memory half would remove
+    coverage without anyone noticing.
+    """
+    trackers = {"in-memory": InMemoryVelocityTracker()}
+
+    try:
+        import redis
+
+        client = redis.Redis(host="127.0.0.1", port=6379, db=15)
+        client.ping()
+        client.flushdb()
+        trackers["redis"] = RedisVelocityTracker(client)
+    except Exception:
+        print("  [skip] no Redis on 127.0.0.1:6379 -- in-memory only. "
+              "Start one with: docker run -d -p 6379:6379 redis:7-alpine")
+
+    return trackers
 
 
 def test_count_increases_with_each_attempt():

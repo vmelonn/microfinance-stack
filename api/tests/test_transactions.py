@@ -29,7 +29,13 @@ def test_purchase_approved():
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "approved"
-        assert body["reason"] == "Approved"
+        # `reason` now carries the DE 39 code decoded against the standard's
+        # table, rather than a hardcoded "Approved". Two reasons that matters:
+        # a decline gets a specific reason instead of a generic one, and the
+        # text is identical whether the transaction went out over the direct
+        # TCP transport or through ACE -- the transports must not be
+        # distinguishable from the response body.
+        assert body["reason"] == "Approved / completed successfully"
         assert body["authorization_id"] == "A18008"
         print("Purchase approved:", body)
 

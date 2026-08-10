@@ -1,0 +1,498 @@
+# microfinance-stack on OpenShift.
+#
+#     oc new-project microfinance
+#     oc apply -f openshift/microfinance-stack.yaml
+#
+# The repository already had an OpenShift-aware Dockerfile -- arbitrary-UID
+# safe, non-root, real health check -- but no manifests at all, so deployment
+# was "build the image and hope". This file closes that gap.
+#
+# ------------------------------------------------------------------
+# READ THIS BEFORE RAISING replicas ABOVE 1
+# ------------------------------------------------------------------
+# The ledger is SQLite inside the container. Each replica therefore has its
+# OWN private set of books. That is precisely why verify_cross_replica.py
+# registers its user against one specific replica and can only prove that
+# *Redis* state is shared -- the ledgers genuinely are not.
+#
+# With more than one replica this is a data-correctness bug, not a
+# performance note: a purchase recorded on pod A is invisible to pod B, and
+# the two will disagree about every balance.
+#
+# Two honest ways forward, in order of preference:
+#   1. Point the stack at Postgres (a LEDGER_DSN, as the microservices repo's
+#      ledger-service does) and then scale freely.
+#   2. Keep SQLite, stay at replicas: 1, and mount the PVC below.
+#
+# This file takes option 2, because it is what the current code actually
+# supports. The Deployment is pinned to one replica and says why.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: microfinance-stack
+  labels:
+    app.kubernetes.io/name: microfinance-stack
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: microfinance-stack-config
+data:
+  # Non-secret only. Anything here is readable by anyone with namespace access.
+  RUN_LOCAL_SIMULATOR: "1"      # dev/test. In production, unset this and point
+                                # SWITCH_HOST at the acquirer's real endpoint.
+  SWITCH_HOST: "127.0.0.1"
+  SWITCH_PORT: "9999"
+
+  # direct = the built-in ISO 8583 codec and TCP client (Stages 1-3).
+  # ace    = SOAP to an IBM ACE integration server, which owns all of it.
+  # See switch/transport.py.
+  ISO8583_TRANSPORT: "direct"
+  ISO8583_SOAP_ENDPOINT: "http://ace-stub:8090/Iso8583Gateway"
+  ISO8583_SOAP_TIMEOUT_SECONDS: "20"
+
+  HSM_KEY_PERSISTENCE_PATH: "/var/lib/microfinance/hsm-base-key.enc"
+
+  CLICKHOUSE_HOST: "clickhouse"
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: "analytics"
+
+---
+# TEMPLATE ONLY. The values below are placeholders so that `oc apply` works
+# on a fresh cluster; they are NOT how secrets should reach production. Use
+# Sealed Secrets, External Secrets, or the cluster's vault integration.
+#
+# stringData rather than data, so a typo is visible in review instead of
+# hiding inside base64 until runtime.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: microfinance-stack-secrets
+  annotations:
+    microfinance.io/warning: "Placeholder values. Replace before any real deployment."
+type: Opaque
+stringData:
+  # Signs every JWT. Unset, the app falls back to a default published in its
+  # own source file and warns loudly at boot.
+  JWT_SECRET: "REPLACE-ME-openssl-rand-hex-32"
+
+  # 32 bytes of hex wrapping the HSM base key.
+  #
+  # LOSING THIS IS UNRECOVERABLE. It decrypts the persisted base key, from
+  # which every per-transaction PIN key is derived. Without it the
+  # persistence file is inert and the app silently falls back to an ephemeral
+  # key -- so PIN blocks encrypted before the loss can never be decrypted
+  # again. Back it up somewhere that is not this cluster.
+  HSM_MASTER_KEY_HEX: "REPLACE-ME-openssl-rand-hex-32"
+
+  CLICKHOUSE_PASSWORD: ""
+
+---
+# The SQLite ledger and the wrapped HSM key.
+#
+# ReadWriteOnce, which also acts as a guardrail: it prevents two pods on
+# different nodes from mounting this, so an accidental replica increase fails
+# to schedule rather than silently splitting the books.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: microfinance-stack-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microfinance-stack
+  labels:
+    app.kubernetes.io/name: microfinance-stack
+spec:
+  # ONE. See the header of this file -- SQLite means each replica has its own
+  # private ledger, so this is a correctness constraint, not a capacity
+  # choice. Move to Postgres before changing it.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: RWO storage cannot be mounted by the old
+    # and new pod simultaneously, so a rolling update would deadlock with the
+    # new pod stuck in ContainerCreating waiting for a volume the old pod
+    # still holds.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: microfinance-stack
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: microfinance-stack
+    spec:
+      serviceAccountName: microfinance-stack
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: api
+          image: microfinance-stack:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {containerPort: 8000, name: http}
+          envFrom:
+            - configMapRef: {name: microfinance-stack-config}
+            - secretRef: {name: microfinance-stack-secrets}
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/microfinance}
+          resources:
+            # No CPU limit: CFS throttling on a latency-sensitive payment path
+            # adds tail latency for no benefit once the request is right.
+            # Memory IS limited, because a leak without one takes the node
+            # down rather than the pod.
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          # /health reports whether the path to the switch is genuinely alive
+          # -- under ISO8583_TRANSPORT=ace that means a real echo test through
+          # to the switch, not merely a running process.
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 8
+            periodSeconds: 10
+            timeoutSeconds: 5
+          # Startup can legitimately take a while: the app waits up to 10s for
+          # the switch connection before it will serve. Without a startupProbe
+          # the liveness threshold would kill it mid-connect, forever.
+          startupProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: microfinance-stack-data
+      # Long enough for an in-flight authorization to finish. Cutting one off
+      # mid-flight manufactures exactly the ambiguous "did the money move"
+      # state the reversal logic exists to avoid creating.
+      terminationGracePeriodSeconds: 45
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: microfinance-stack
+  labels:
+    app.kubernetes.io/name: microfinance-stack
+spec:
+  selector:
+    app.kubernetes.io/name: microfinance-stack
+  ports:
+    - {port: 8000, targetPort: 8000, name: http}
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: microfinance-stack
+  annotations:
+    haproxy.router.openshift.io/timeout: "60s"
+spec:
+  to: {kind: Service, name: microfinance-stack}
+  port: {targetPort: http}
+  tls:
+    # Payments, so no plaintext. edge terminates at the router; in-cluster
+    # traffic is plain HTTP, which is acceptable behind a NetworkPolicy and is
+    # the point at which a real PCI environment would move to re-encrypt.
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+---
+# Redis: shared idempotency claims and risk velocity windows.
+#
+# No persistence, deliberately. Everything in it is short-lived derived state
+# with a TTL -- claims expire in 24h, velocity windows in 60s. A restart costs
+# at most a day of replay protection, and the ledger's PRIMARY KEY (rrn) is
+# the real backstop against double-posting, which is exactly why correctness
+# lives there and not here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: redis}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: redis}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--save", "", "--appendonly", "no",
+                 "--maxmemory", "256mb",
+                 # allkeys-lru, not noeviction: under memory pressure,
+                 # evicting the oldest claim degrades replay protection,
+                 # whereas refusing writes fails every transaction outright.
+                 "--maxmemory-policy", "allkeys-lru"]
+          ports: [{containerPort: 6379}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 320Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            exec: {command: [redis-cli, ping]}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels: {app.kubernetes.io/name: redis}
+spec:
+  selector: {app.kubernetes.io/name: redis}
+  ports: [{port: 6379, targetPort: 6379}]
+
+---
+# ClickHouse: the analytics warehouse. Replaced the originally-planned
+# Redshift -- self-hosted, so it needs no cloud account and the code that
+# talks to it is genuinely exercised by tests rather than only by inspection.
+#
+# Single node. ReplicatedMergeTree plus Keeper is the growth path, not day-one
+# work: replication would multiply storage to protect data that can be fully
+# rebuilt from the ledger by rerunning the sync with an empty watermark. The
+# ledger is the system of record; this is derived.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  labels: {app.kubernetes.io/name: clickhouse}
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: clickhouse}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: clickhouse}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 101              # the clickhouse UID in the official image
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24-alpine
+          env:
+            - {name: CLICKHOUSE_DB, value: analytics}
+            - {name: CLICKHOUSE_USER, value: default}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: microfinance-stack-secrets, key: CLICKHOUSE_PASSWORD}
+          ports:
+            - {containerPort: 8123, name: http}     # clickhouse-connect uses HTTP
+            - {containerPort: 9000, name: native}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/clickhouse}
+          # Memory-hungry by design: it buffers inserts and holds mark caches.
+          # Starving it produces MEMORY_LIMIT_EXCEEDED on queries that ought to
+          # be trivial, so the request is well above the app's.
+          resources:
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {memory: 3Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /ping, port: 8123}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 20Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  labels: {app.kubernetes.io/name: clickhouse}
+spec:
+  selector: {app.kubernetes.io/name: clickhouse}
+  ports:
+    - {port: 8123, targetPort: 8123, name: http}
+    - {port: 9000, targetPort: 9000, name: native}
+
+---
+# Hourly incremental load into ClickHouse.
+#
+# analytics/sync_to_warehouse.py already had the right shape for this -- a CLI
+# that runs to completion and exits non-zero on failure, same as
+# ops/run_reconciliation.py.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: warehouse-sync
+  labels: {app.kubernetes.io/name: warehouse-sync}
+spec:
+  schedule: "0 * * * *"
+  timeZone: "UTC"          # never the node's local zone: a DST shift would
+                           # otherwise skip or repeat an hour
+  # Two overlapping runs would read the same watermark and load the same rows
+  # twice. ReplacingMergeTree would repair the fact table, but mv_daily_volume
+  # fires on INSERT -- before deduplication -- so the aggregate would stay
+  # permanently wrong. Forbid is a correctness setting here.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # No retries: the job is resumable by design, because the watermark only
+      # advances past confirmed batches. The next scheduled run resumes
+      # exactly where a failure stopped.
+      backoffLimit: 0
+      activeDeadlineSeconds: 3000
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: microfinance-stack
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: sync
+              image: microfinance-stack:latest
+              command: ["python3", "analytics/sync_to_warehouse.py",
+                        "/var/lib/microfinance/ledger.db"]
+              envFrom:
+                - configMapRef: {name: microfinance-stack-config}
+                - secretRef: {name: microfinance-stack-secrets}
+              volumeMounts:
+                - {name: data, mountPath: /var/lib/microfinance}
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits: {memory: 1Gi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: microfinance-stack-data
+
+---
+# Daily reconciliation: the ledger against the switch's settlement file.
+#
+# The only job in the system that checks our own beliefs against an
+# independent source of truth -- everything else verifies internal
+# self-consistency. It is also what resolves the "unknown" outcomes that a
+# switch timeout leaves behind.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reconciliation
+  labels: {app.kubernetes.io/name: reconciliation}
+spec:
+  schedule: "30 2 * * *"      # after the settlement file lands
+  timeZone: "UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 10   # keep more failures -- those are the ones
+                               # anyone will actually want the logs for
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: microfinance-stack
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: reconcile
+              image: microfinance-stack:latest
+              # Exits 1 on anything unclean, so alerting keys off the exit code
+              # rather than parsing stdout. An unclean reconciliation needs a
+              # human, never an automatic retry.
+              command: ["python3", "ops/run_reconciliation.py",
+                        "/var/lib/microfinance/ledger.db",
+                        "/var/lib/microfinance/settlement.json"]
+              volumeMounts:
+                - {name: data, mountPath: /var/lib/microfinance}
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {memory: 512Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: [ALL]}
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: microfinance-stack-data
+
+---
+# Default deny, then admit only what is needed. Without this, every pod in the
+# namespace can reach Redis and ClickHouse directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-router-to-api
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: microfinance-stack}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {policy-group.network.openshift.io/ingress: ""}
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-datastores
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [redis, clickhouse]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: microfinance-stack}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: warehouse-sync}
